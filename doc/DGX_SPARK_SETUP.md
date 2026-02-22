@@ -9,6 +9,24 @@ This guide sets up a **local, two-stack agent system** on **one DGX Spark**:
 
 ---
 
+## Table of contents
+
+1. [0) Assumptions](#0-assumptions)
+2. [1) Quick path (recommended): run repo setup scripts](#1-quick-path-recommended-run-repo-setup-scripts)
+3. [2) Start Nemotron3-Nano model server for PM agent (choose one, mutually exclusive)](#2-start-nemotron3-nano-model-server-for-pm-agent-choose-one-mutually-exclusive)
+4. [2A) Start vLLM (PM brain) - it takes ~82 GB VRAM](#2a-start-vllm-pm-brain---it-takes-82-gb-vram)
+5. [2B) Start NIM (PM brain alternative on DGX Spark)](#2b-start-nim-pm-brain-alternative-on-dgx-spark)
+6. [2C) Profile comparison table (NIM + Nemotron3-Nano on DGX Spark)](#2c-profile-comparison-table-nim--nemotron3-nano-on-dgx-spark)
+7. [3) Start Ollama (coding agent backend)](#3-start-ollama-coding-agent-backend)
+8. [4) Install Claude Code and connect it to Ollama](#4-install-claude-code-and-connect-it-to-ollama)
+9. [5) Configure OpenClaw to use a local PM endpoint (vLLM or NIM)](#5-configure-openclaw-to-use-a-local-pm-endpoint-vllm-or-nim)
+10. [6) Add approval-gated delegation (Option B)](#6-add-approval-gated-delegation-option-b)
+11. [7) Ensure PM reliably triggers subagents in the coding agent](#7-ensure-pm-reliably-triggers-subagents-in-the-coding-agent)
+12. [8) End-to-end sanity test](#8-end-to-end-sanity-test)
+13. [9) Troubleshooting](#9-troubleshooting)
+
+---
+
 ## 0) Assumptions
 
 - You’re on the DGX Spark host (Linux) with a working NVIDIA stack.
@@ -154,6 +172,29 @@ If startup fails, inspect logs:
 ```bash
 docker logs --tail 200 nim-llm-demo
 ```
+
+### 2C) Profile comparison table (NIM + Nemotron3-Nano on DGX Spark)
+
+The table below uses `TP=1 / PP=1` (single DGX Spark) and uses NVIDIA's cross-profile accuracy slice plus DGX Spark community performance where available.
+VRAM "idle" is weights-focused (observed for BF16; file-size-based expectation for FP8/NVFP4).
+VRAM "peak" is scenario-modeled for `max_model_len=262,144` and `max_num_seqs=8`, with KV cache dtype matched to common recommendations.
+
+| Profile name | Precision | TP/PP | Accuracy metrics (dataset: score) | VRAM idle (GB) | VRAM peak (GB) | Latency (ms per token) | Throughput (tokens/s) | Notes on stability/compatibility | Recommendation |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| vLLM BF16 profile (NIM) | BF16 | TP1 / PP1 | MMLU-Pro: 78.3; AIME25 (no tools): 89.1; GPQA (no tools): 73.0; LiveCodeBench: 68.3; SciCode: 33.0; HLE (no tools): 10.2; TauBench V2 Airline/Retail/Telecom: 48.0/56.9/42.2 | 57.62 (observed load "mem usage") | ~71.7 (modeled, 256k x 8 seq) | - (no vLLM-bench result in collected sources) | 25-30 (anecdotal BF16 gen rate) | Highest accuracy; largest memory footprint; tuning `mamba-ssm-cache-dtype` impacts quality/perf. | Use if you prioritize maximum accuracy over VRAM/perf. |
+| vLLM FP8 profile (NIM) | FP8 (selective BF16 kept in parts) | TP1 / PP1 | MMLU-Pro: 78.1; AIME25 (no tools): 87.7; GPQA (no tools): 72.5; LiveCodeBench: 67.6; SciCode: 31.9; HLE (no tools): 10.3; TauBench V2 Airline/Retail/Telecom: 44.8/55.6/40.8 | ~30.46 (profile file size proxy) | ~36.9 (modeled, 256k x 8 seq) | 48.61 (mean TPOT, benchmarked) | 154.40 (output tok/s, benchmarked) | Explicitly supported on DGX Spark in NIM profile list. Recommended to use FP8 KV cache and lower `gpu-memory-utilization` on DGX Spark for stability. | Recommended PM brain profile: best accuracy/VRAM balance with strong DGX Spark perf. |
+| vLLM NVFP4 profile (NIM listing) | NVFP4 weights + FP8 KV (typical) | TP1 / PP1 | MMLU-Pro: 77.4; AIME25 (no tools): 86.7; GPQA (no tools): 71.9; LiveCodeBench: 65.4; SciCode: 30.7; HLE (no tools): 9.4; TauBench V2 Airline/Retail/Telecom: 41.5/54.1/41.2 | ~18.04 (profile file size proxy) | ~24.5 (modeled, 256k x 8 seq) | 36.53 (mean TPOT, benchmarked) | 167.61 (output tok/s, benchmarked) | Not listed as DGX Spark-supported in NIM profile table; multiple DGX Spark reports of backend/kernel friction and instability (misaligned address/Xid, MoE backend support errors). | Not recommended for "PM brain with NIM on DGX Spark" due to support + stability risk. |
+
+#### Recommendation and OpenClaw PM brain integration notes
+
+Recommended profile: FP8 vLLM profile under NIM (`TP1 / PP1`).
+
+FP8 is the strongest choice for a DGX Spark "PM brain" under these constraints because:
+
+- It is explicitly supported on DGX Spark in NVIDIA's NIM vLLM profile list.
+- It is near-BF16 accuracy on NVIDIA's published evaluation slice (often within ~0.2-1.4 points depending on benchmark).
+- It provides materially better VRAM headroom (file size ~30.46 GB) than BF16 (~58.84 GB), which matters on DGX Spark if you also want longer contexts, more concurrency, or additional services.
+- DGX Spark community benchmarking shows strong serving throughput and token latency for FP8 under vLLM's benchmark harness.
 
 ---
 

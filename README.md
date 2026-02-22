@@ -6,7 +6,7 @@ A local, no-API-cost(ish) agent stack optimized for **repo-level issue fixing** 
 
 - **PM brain (planner/orchestrator):** OpenClaw → (vLLM or NIM) → `nemotron-3-nano`
 - **Coding agent (repo editor/executor):** Claude Code → Ollama → `qwen3-coder`
-- **Search:** optional (Brave API or self-hosted search). Coding subagents prioritize repo exploration and local execution.
+- **Search:** optional. Default is local-only; when needed, coding tasks can enable web search via Ollama cloud models.
 - **Backend policy:** run **one** PM backend at a time (vLLM or NIM), not both simultaneously.
 
 Key design goal: **The PM agent can talk to the coding agent**, but must ask for **your approval** before delegating. The coding agent can **spawn subagents** for parallel repo exploration when needed.
@@ -35,7 +35,10 @@ Key design goal: **The PM agent can talk to the coding agent**, but must ask for
 │ ├── PRD.md
 │ └── SOUL.md
 ├── config/
+├── tasks/
+│ └── TEMPLATE_PACKET.md
 └── scripts/
+  ├── run_claude_task.sh
   ├── setup_vllm_nemotron.sh
   ├── setup_nim_nemotron.sh
   └── setup_ollama_claude.sh
@@ -53,7 +56,7 @@ Key design goal: **The PM agent can talk to the coding agent**, but must ask for
 3) Configure OpenClaw to:
    - use vLLM as primary model
    - point `baseUrl` to your PM endpoint (`http://127.0.0.1:8000/v1`)
-   - allow only your approved task delegation command(s)
+   - allow only `scripts/run_claude_task.sh <packet.md>` as delegation command
 4) Use the **handoff protocol** to dispatch coding tasks (approval required).
 
 ---
@@ -122,12 +125,35 @@ See full setup guide: `doc/DGX_SPARK_SETUP.md`
 2) PM agent produces:
    - a plan (bulleted)
    - task tickets (numbered)
-   - a “Coding Task Packet” (structured)
+   - a “Coding Task Packet” (structured, based on `tasks/TEMPLATE_PACKET.md`)
 3) PM asks: “Approve delegating Ticket #N to coding agent?”
 4) On approval, PM runs `scripts/run_claude_task.sh` which launches Claude Code with:
    - task packet
-   - explicit instruction to **create subagents**
+   - validated subagent range from packet (`Subagents Min` / `Subagents Max`)
+   - web-search mode derived from packet (`Web Search: off|optional|required`) or env override
+   - auto-switch to cloud model for `Web Search: required` (from `Web Search Model` or `WEB_SEARCH_CLOUD_MODEL`)
 5) Claude Code edits files + runs tests, then reports results back.
+
+---
+
+## Reliable subagents + web search
+
+Use this checklist for consistent behavior:
+
+1) Always dispatch through `scripts/run_claude_task.sh` (never direct `claude ...` from PM).
+2) Keep OpenClaw exec allowlist narrow:
+   - `scripts/run_claude_task.sh <packet.md>`
+3) Create packets from `tasks/TEMPLATE_PACKET.md` and include:
+   - `Web Search: off|optional|required`
+   - optional `Web Search Model: <name>:cloud` (used when search is required)
+   - `Subagents Min: 2..10`
+   - `Subagents Max: 2..10` (must be >= min)
+   - `Subagent instruction (MANDATORY)`
+4) Choose model by task type:
+   - local/offline coding: `CLAUDE_MODEL=qwen3-coder`
+   - web-search-required tasks: wrapper auto-switches to `WEB_SEARCH_CLOUD_MODEL` (default `minimax-m2.5:cloud`) if needed
+5) If you need hosted search subagents from Ollama, initialize Claude Code via:
+   - `ollama launch claude --model minimax-m2.5:cloud --subagents search-web,search-github,search-docs`
 
 ---
 
@@ -141,4 +167,3 @@ See full setup guide: `doc/DGX_SPARK_SETUP.md`
 - Ollama Anthropic compatibility docs: https://docs.ollama.com/api/anthropic-compatibility
 - Ollama Claude Code integration docs: https://docs.ollama.com/integrations/claude-code
 - Ollama subagents + web search post: https://ollama.com/blog/web-search-subagents-claude-code
-

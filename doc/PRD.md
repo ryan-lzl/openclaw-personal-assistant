@@ -74,7 +74,7 @@ PM must:
 - ask user: “Approve delegating Ticket #N?”
 
 Coding agent must:
-- spawn 2–4 subagents when tasks can parallelize:
+- spawn 2–10 subagents when tasks can parallelize:
   - file search
   - test mapping
   - API route tracing
