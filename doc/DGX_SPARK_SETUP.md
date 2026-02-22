@@ -2,7 +2,7 @@
 
 This guide sets up a **local, two-stack agent system** on **one DGX Spark**:
 
-- **PM brain (planner/orchestrator):** OpenClaw + vLLM + `nemotron-3-nano-30b-a3b`
+- **PM brain (planner/orchestrator):** OpenClaw + vLLM + `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`
 - **Coding agent (repo editor/executor):** Claude Code + Ollama + `qwen3-coder`
 - **Delegation safety:** PM must ask for **your approval** before assigning work to the coding agent
 - **Subagents:** coding agent is instructed to **spawn subagents** for parallel repo exploration when needed
@@ -22,50 +22,78 @@ This guide sets up a **local, two-stack agent system** on **one DGX Spark**:
 
 ---
 
-## 1) Start vLLM (PM brain)
+## 1) Quick path (recommended): run repo setup scripts
 
-### Option A — Docker (recommended)
+If your `.env` already contains `HF_TOKEN`, the fastest path is to run the two repo scripts.
 
-Pull the vLLM OpenAI-compatible server image:
-
-```bash
-docker pull vllm/vllm-openai:nightly
-````
-
-Set a Hugging Face token for downloading models (if needed):
+From repo root:
 
 ```bash
-export HF_TOKEN="hf_xxx_your_token"
-mkdir -p ~/.cache/huggingface
+cd /home/ryan/workspace/openclaw-personal-assistant
+chmod +x scripts/setup_vllm_nemotron.sh scripts/setup_ollama_claude.sh
+./scripts/setup_vllm_nemotron.sh
+./scripts/setup_ollama_claude.sh
+source scripts/claude_ollama_env.sh
+claude --model qwen3-coder
 ```
 
-Run the PM brain server:
+What each script does:
 
-```bash
-docker run -d --name vllm-pm \
-  --runtime nvidia --gpus all --ipc=host \
-  -p 8000:8000 \
-  -v ~/.cache/huggingface:/root/.cache/huggingface \
-  -e HUGGING_FACE_HUB_TOKEN=$HF_TOKEN \
-  vllm/vllm-openai:nightly \
-    --model nvidia/nemotron-3-nano-30b-a3b \
-    --served-model-name pm \
-    --dtype bfloat16 \
-    --max-model-len 32768 \
-    --enable-prefix-caching
-```
+* `scripts/setup_vllm_nemotron.sh`
+  * loads `HF_TOKEN` from `.env` (or uses `HUGGING_FACE_HUB_TOKEN` if already exported)
+  * pulls `nvcr.io/nvidia/vllm:26.01-py3`
+  * starts Docker container `vllm-nemotron` on `http://127.0.0.1:8000`
+  * waits for `/v1/models` readiness
+* `scripts/setup_ollama_claude.sh`
+  * ensures Ollama is running on `http://127.0.0.1:11434`
+  * pulls `qwen3-coder`
+  * writes `scripts/claude_ollama_env.sh` for Claude Code env vars
+  * checks if `claude` CLI is installed
 
-Quick check:
-
-```bash
-curl -s http://127.0.0.1:8000/v1/models
-```
-
-If you see `"pm"` in the model list, vLLM is up.
+If you prefer explicit/manual steps, use sections 3-4 below.
 
 ---
 
-## 2) Start Ollama (coding agent backend)
+## 2) Start vLLM (PM brain)
+
+Use the repo script (do not run manual `docker run` commands for vLLM in this setup).
+
+Recommended `.env` values:
+
+```bash
+VLLM_IMAGE="nvcr.io/nvidia/vllm:26.01-py3"
+VLLM_CONTAINER_NAME="vllm-nemotron"
+VLLM_MODEL="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+VLLM_MAX_MODEL_LEN=262144
+VLLM_ALLOW_LONG_MAX_MODEL_LEN=0
+VLLM_TRUST_REMOTE_CODE=1
+VLLM_ENABLE_PREFIX_CACHING=1
+STARTUP_TIMEOUT_SEC=600
+STARTUP_POLL_SEC=10
+```
+
+Start (or restart) vLLM:
+
+```bash
+docker rm -f vllm-nemotron 2>/dev/null || true
+./scripts/setup_vllm_nemotron.sh
+```
+
+Verify endpoint:
+
+```bash
+curl -v --max-time 10 http://127.0.0.1:8000/v1/models
+```
+
+If startup fails, inspect logs:
+
+```bash
+docker logs --tail 200 vllm-nemotron
+```
+
+---
+
+## 3) Start Ollama (coding agent backend)
 
 Install Ollama (use Ollama’s official install method), then start it:
 
@@ -88,7 +116,7 @@ ollama ps
 
 ---
 
-## 3) Install Claude Code and connect it to Ollama
+## 4) Install Claude Code and connect it to Ollama
 
 Install Claude Code (follow Claude Code’s official install steps on your OS).
 
@@ -110,7 +138,7 @@ If it opens a session and responds, Claude Code ↔ Ollama works.
 
 ---
 
-## 4) Configure OpenClaw to use vLLM as the PM model
+## 5) Configure OpenClaw to use vLLM as the PM model
 
 Create `config/openclaw.json` (example):
 
@@ -142,11 +170,11 @@ Notes:
 
 ---
 
-## 5) Add approval-gated delegation (Option B)
+## 6) Add approval-gated delegation (Option B)
 
 Goal: The PM agent can *only* trigger the coding agent through a **single wrapper script**, and OpenClaw will ask for approval before it runs.
 
-### 5.1 Create the wrapper script
+### 6.1 Create the wrapper script
 
 Create `scripts/run_claude_task.sh`:
 
@@ -184,7 +212,7 @@ Make it executable:
 chmod +x scripts/run_claude_task.sh
 ```
 
-### 5.2 Configure OpenClaw exec approvals
+### 6.2 Configure OpenClaw exec approvals
 
 In OpenClaw, enable exec approvals and allowlist only:
 
@@ -201,7 +229,7 @@ Expected behavior:
 
 ---
 
-## 6) Ensure PM reliably triggers subagents in the coding agent
+## 7) Ensure PM reliably triggers subagents in the coding agent
 
 Claude Code subagent behavior is tool-driven, but you can reliably nudge it by including the explicit phrase:
 
@@ -224,7 +252,7 @@ Create subagents to parallelize:
 
 ---
 
-## 7) End-to-end sanity test
+## 8) End-to-end sanity test
 
 1. Start services:
 
@@ -258,7 +286,7 @@ Done.
 
 ---
 
-## 8) Troubleshooting
+## 9) Troubleshooting
 
 ### vLLM OOM
 
@@ -283,7 +311,3 @@ Done.
 
 * Ensure the packet explicitly says: “Create subagents …”
 * Wrapper script appends the mandatory instruction; confirm you’re using it to launch Claude Code
-
-```
-::contentReference[oaicite:0]{index=0}
-```

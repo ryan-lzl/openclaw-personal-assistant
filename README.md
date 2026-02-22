@@ -25,6 +25,7 @@ Key design goal: **The PM agent can talk to the coding agent**, but must ask for
 ---
 
 ## Repository layout
+```bash
 .
 ├── README.md
 ├── IDENTITY.md
@@ -41,7 +42,7 @@ Key design goal: **The PM agent can talk to the coding agent**, but must ask for
 └── scripts/
 ├── run_claude_task.sh
 └── healthcheck.sh
-
+```
 
 ---
 
