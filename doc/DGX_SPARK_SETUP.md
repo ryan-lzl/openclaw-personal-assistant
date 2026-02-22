@@ -2,7 +2,7 @@
 
 This guide sets up a **local, two-stack agent system** on **one DGX Spark**:
 
-- **PM brain (planner/orchestrator):** OpenClaw + vLLM + `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`
+- **PM brain (planner/orchestrator):** OpenClaw + (vLLM or NIM, choose one at a time) + Nemotron-family model
 - **Coding agent (repo editor/executor):** Claude Code + Ollama + `qwen3-coder`
 - **Delegation safety:** PM must ask for **your approval** before assigning work to the coding agent
 - **Subagents:** coding agent is instructed to **spawn subagents** for parallel repo exploration when needed
@@ -12,9 +12,9 @@ This guide sets up a **local, two-stack agent system** on **one DGX Spark**:
 ## 0) Assumptions
 
 - You’re on the DGX Spark host (Linux) with a working NVIDIA stack.
-- You have Docker available (recommended) or can run Python vLLM directly.
+- You have Docker available with GPU access.
 - You will run:
-  - vLLM (PM) on `http://127.0.0.1:8000`
+  - PM model server (vLLM or NIM, not both at once) on `http://127.0.0.1:8000`
   - Ollama on `http://127.0.0.1:11434`
 - You want **local-only / no external API cost** by default.
 
@@ -24,14 +24,24 @@ This guide sets up a **local, two-stack agent system** on **one DGX Spark**:
 
 ## 1) Quick path (recommended): run repo setup scripts
 
-If your `.env` already contains `HF_TOKEN`, the fastest path is to run the two repo scripts.
+Pick one PM backend:
+
+- **vLLM path:** set `HF_TOKEN` in `.env`
+- **NIM path:** set `NIM_IMAGE` and `NIM_NGC_API_KEY` (or `NGC_API_KEY`) in `.env`
+- Do **not** run both PM backends at the same time for Nemotron3-Nano in this setup.
 
 From repo root:
 
 ```bash
 cd /home/ryan/workspace/openclaw-personal-assistant
-chmod +x scripts/setup_vllm_nemotron.sh scripts/setup_ollama_claude.sh
+chmod +x scripts/setup_vllm_nemotron.sh scripts/setup_nim_nemotron.sh scripts/setup_ollama_claude.sh
+
+# Option A (vLLM PM backend)
 ./scripts/setup_vllm_nemotron.sh
+
+# Option B (NIM PM backend)
+# ./scripts/setup_nim_nemotron.sh
+
 ./scripts/setup_ollama_claude.sh
 source scripts/claude_ollama_env.sh
 claude --model qwen3-coder
@@ -44,17 +54,24 @@ What each script does:
   * pulls `nvcr.io/nvidia/vllm:26.01-py3`
   * starts Docker container `vllm-nemotron` on `http://127.0.0.1:8000`
   * waits for `/v1/models` readiness
+* `scripts/setup_nim_nemotron.sh`
+  * loads `NIM_*` vars from `.env` (and accepts NVIDIA alias vars like `IMG_NAME`)
+  * logs into `nvcr.io`, pulls `NIM_IMAGE`, and launches NIM with Spark-style cache/workspace mounts
+  * starts Docker container `nim-llm-demo` on `http://127.0.0.1:8000` by default
+  * supports `--list-profiles` and waits for `/v1/models` readiness
 * `scripts/setup_ollama_claude.sh`
   * ensures Ollama is running on `http://127.0.0.1:11434`
   * pulls `qwen3-coder`
   * writes `scripts/claude_ollama_env.sh` for Claude Code env vars
   * checks if `claude` CLI is installed
 
-If you prefer explicit/manual steps, use sections 3-4 below.
+If you prefer explicit/manual steps, use sections 2-4 below.
 
 ---
 
-## 2) Start vLLM (PM brain)
+## 2) Start Nemotron3-Nano model server for PM agent (choose one, mutually exclusive)
+
+### 2A) Start vLLM (PM brain) - it takes ~82 GB VRAM
 
 Use the repo script (do not run manual `docker run` commands for vLLM in this setup).
 
@@ -75,6 +92,7 @@ STARTUP_POLL_SEC=10
 Start (or restart) vLLM:
 
 ```bash
+docker rm -f nim-llm-demo 2>/dev/null || true
 docker rm -f vllm-nemotron 2>/dev/null || true
 ./scripts/setup_vllm_nemotron.sh
 ```
@@ -89,6 +107,52 @@ If startup fails, inspect logs:
 
 ```bash
 docker logs --tail 200 vllm-nemotron
+```
+
+### 2B) Start NIM (PM brain alternative on DGX Spark)
+
+Use the repo script to keep Spark-specific mounts and env handling consistent.
+
+Recommended `.env` values:
+
+```bash
+NIM_IMAGE="nvcr.io/nim/nvidia/nemotron-3-nano:1.7.0-variant"
+NIM_CONTAINER_NAME="nim-llm-demo"
+NIM_PORT=8000
+NIM_MODEL_NAME=""
+NIM_MODEL_PROFILE=""
+NIM_CACHE_DIR="$HOME/.cache/nim"
+NIM_WORKSPACE_DIR="$HOME/.local/share/nim/workspace"
+NIM_SHM_SIZE="16GB"
+NIM_STARTUP_TIMEOUT_SEC=1200
+NIM_STARTUP_POLL_SEC=10
+NIM_NGC_API_KEY="<your_ngc_api_key>"
+```
+
+List profiles for the selected image (optional):
+
+```bash
+./scripts/setup_nim_nemotron.sh --list-profiles
+```
+
+Start (or restart) NIM:
+
+```bash
+docker rm -f vllm-nemotron 2>/dev/null || true
+docker rm -f nim-llm-demo 2>/dev/null || true
+./scripts/setup_nim_nemotron.sh
+```
+
+Verify endpoint:
+
+```bash
+curl -v --max-time 10 http://127.0.0.1:8000/v1/models
+```
+
+If startup fails, inspect logs:
+
+```bash
+docker logs --tail 200 nim-llm-demo
 ```
 
 ---
@@ -138,7 +202,7 @@ If it opens a session and responds, Claude Code ↔ Ollama works.
 
 ---
 
-## 5) Configure OpenClaw to use vLLM as the PM model
+## 5) Configure OpenClaw to use a local PM endpoint (vLLM or NIM)
 
 Create `config/openclaw.json` (example):
 
@@ -165,8 +229,10 @@ Create `config/openclaw.json` (example):
 
 Notes:
 
-* `baseUrl` must end with `/v1` because vLLM exposes OpenAI-compatible endpoints under that prefix.
+* `baseUrl` must end with `/v1` because both vLLM and NIM expose OpenAI-compatible endpoints under that prefix.
+* If you change `NIM_PORT` from `8000`, update `baseUrl` accordingly.
 * `apiKey` can be any placeholder for local usage unless you configure auth.
+* Keeping provider id `vllm` is fine even if the backend is NIM; it is just a local label in this config.
 
 ---
 
@@ -256,7 +322,7 @@ Create subagents to parallelize:
 
 1. Start services:
 
-   * vLLM PM: `http://127.0.0.1:8000`
+   * PM backend (vLLM or NIM): `http://127.0.0.1:8000`
    * Ollama: `http://127.0.0.1:11434`
 
 2. In OpenClaw, ask PM:
@@ -293,6 +359,13 @@ Done.
 * Reduce `--max-model-len` from `32768` → `16384`
 * Reduce concurrency (if you set it)
 * Ensure no other large model is pinned in GPU memory
+
+### NIM startup issues
+
+* Verify auth key is set: `NIM_NGC_API_KEY` (or `NGC_API_KEY`)
+* List profiles first: `./scripts/setup_nim_nemotron.sh --list-profiles`
+* Check container logs: `docker logs --tail 200 nim-llm-demo`
+* Ensure vLLM is stopped before launching NIM: `docker rm -f vllm-nemotron`
 
 ### Ollama slow / CPU offload
 

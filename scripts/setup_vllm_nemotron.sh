@@ -287,4 +287,4 @@ else
   cat /tmp/vllm_models.json
 fi
 
-echo "Done. PM endpoint: http://127.0.0.1:${VLLM_PORT}/v1"
+echo "Done. Model '${VLLM_SERVED_MODEL_NAME}' endpoint: http://127.0.0.1:${VLLM_PORT}/v1"
