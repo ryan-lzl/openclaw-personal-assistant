@@ -55,10 +55,10 @@ cd /home/ryan/workspace/openclaw-personal-assistant
 chmod +x scripts/setup_vllm_nemotron.sh scripts/setup_nim_nemotron.sh scripts/setup_ollama_claude.sh
 
 # Option A (vLLM PM backend)
-./scripts/setup_vllm_nemotron.sh
+#./scripts/setup_vllm_nemotron.sh
 
 # Option B (NIM PM backend)
-# ./scripts/setup_nim_nemotron.sh
+./scripts/setup_nim_nemotron.sh
 
 ./scripts/setup_ollama_claude.sh
 source scripts/claude_ollama_env.sh
@@ -75,7 +75,7 @@ What each script does:
 * `scripts/setup_nim_nemotron.sh`
   * loads `NIM_*` vars from `.env` (and accepts NVIDIA alias vars like `IMG_NAME`)
   * logs into `nvcr.io`, pulls `NIM_IMAGE`, and launches NIM with Spark-style cache/workspace mounts
-  * starts Docker container `nim-llm-demo` on `http://127.0.0.1:8000` by default
+  * starts Docker container `nim-nemotron` on `http://127.0.0.1:8000` by default
   * supports `--list-profiles` and waits for `/v1/models` readiness
 * `scripts/setup_ollama_claude.sh`
   * ensures Ollama is running on `http://127.0.0.1:11434`
@@ -110,7 +110,7 @@ STARTUP_POLL_SEC=10
 Start (or restart) vLLM:
 
 ```bash
-docker rm -f nim-llm-demo 2>/dev/null || true
+docker rm -f nim-nemotron 2>/dev/null || true
 docker rm -f vllm-nemotron 2>/dev/null || true
 ./scripts/setup_vllm_nemotron.sh
 ```
@@ -135,7 +135,7 @@ Recommended `.env` values:
 
 ```bash
 NIM_IMAGE="nvcr.io/nim/nvidia/nemotron-3-nano:1.7.0-variant"
-NIM_CONTAINER_NAME="nim-llm-demo"
+NIM_CONTAINER_NAME="nim-nemotron"
 NIM_PORT=8000
 NIM_MODEL_NAME=""
 NIM_MODEL_PROFILE=""
@@ -157,7 +157,7 @@ Start (or restart) NIM:
 
 ```bash
 docker rm -f vllm-nemotron 2>/dev/null || true
-docker rm -f nim-llm-demo 2>/dev/null || true
+docker rm -f nim-nemotron 2>/dev/null || true
 ./scripts/setup_nim_nemotron.sh
 ```
 
@@ -170,7 +170,7 @@ curl -v --max-time 10 http://127.0.0.1:8000/v1/models
 If startup fails, inspect logs:
 
 ```bash
-docker logs --tail 200 nim-llm-demo
+docker logs --tail 200 nim-nemotron
 ```
 
 ### 2C) Profile comparison table (NIM + Nemotron3-Nano on DGX Spark)
@@ -405,7 +405,7 @@ Done.
 
 * Verify auth key is set: `NIM_NGC_API_KEY` (or `NGC_API_KEY`)
 * List profiles first: `./scripts/setup_nim_nemotron.sh --list-profiles`
-* Check container logs: `docker logs --tail 200 nim-llm-demo`
+* Check container logs: `docker logs --tail 200 nim-nemotron`
 * Ensure vLLM is stopped before launching NIM: `docker rm -f vllm-nemotron`
 
 ### Ollama slow / CPU offload

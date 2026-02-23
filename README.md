@@ -74,7 +74,7 @@ HF_TOKEN="<your_hf_token>"
 Run:
 
 ```bash
-docker rm -f nim-llm-demo vllm-nemotron 2>/dev/null || true
+docker rm -f nim-nemotron vllm-nemotron 2>/dev/null || true
 ./scripts/setup_vllm_nemotron.sh
 ```
 
@@ -96,7 +96,7 @@ Optional profile discovery:
 Run:
 
 ```bash
-docker rm -f vllm-nemotron nim-llm-demo 2>/dev/null || true
+docker rm -f vllm-nemotron nim-nemotron 2>/dev/null || true
 ./scripts/setup_nim_nemotron.sh
 ```
 
@@ -112,7 +112,7 @@ If startup fails:
 
 ```bash
 docker logs --tail 200 vllm-nemotron
-docker logs --tail 200 nim-llm-demo
+docker logs --tail 200 nim-nemotron
 ```
 
 See full setup guide: `doc/DGX_SPARK_SETUP.md`

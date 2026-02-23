@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${ENV_FILE:-$ROOT_DIR/.env}"
 LOCK_FILE="${LOCK_FILE:-$ROOT_DIR/config/base_model.lock.json}"
 
-DEFAULT_NIM_CONTAINER_NAME="nim-llm-demo"
+DEFAULT_NIM_CONTAINER_NAME="nim-nemotron"
 DEFAULT_NIM_PORT="8000"
 DEFAULT_NIM_MODEL_NAME="nvidia/nemotron-3-nano"
 DEFAULT_NIM_CACHE_DIR="${HOME}/.cache/nim"
@@ -242,4 +242,4 @@ echo "[6/6] NIM is up."
 if [[ -n "${NIM_MODEL_NAME}" ]] && grep -q "\"${NIM_MODEL_NAME}\"" /tmp/nim_models.json; then
   echo "Model '${NIM_MODEL_NAME}' is reported by /v1/models."
 fi
-echo "Done. PM endpoint: http://127.0.0.1:${NIM_PORT}/v1"
+echo "Done. Model '${NIM_MODEL_NAME}' endpoint: http://127.0.0.1:${NIM_PORT}/v1"
