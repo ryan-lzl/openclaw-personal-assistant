@@ -2,8 +2,10 @@
 
 This guide sets up a **local, two-stack agent system** on **one DGX Spark**:
 
-- **PM brain (planner/orchestrator):** OpenClaw + (vLLM or NIM, choose one at a time) + Nemotron-family model
-- **Coding agent (repo editor/executor):** Claude Code + Ollama + `qwen3-coder`
+- **PM brain (planner/orchestrator):** OpenClaw (installed + configured via `ollama launch openclaw`)
+  - You can run the PM model via **Ollama local/cloud models** (recommended), or
+  - **Optionally** host **Nemotron3-Nano** locally via **vLLM or NIM** (mutually exclusive).
+- **Coding agent (repo editor/executor):** **Claude Code** backed by **Ollama** using `qwen3-coder`
 - **Delegation safety:** PM must ask for **your approval** before assigning work to the coding agent
 - **Subagents:** coding agent is instructed to **spawn subagents** for parallel repo exploration when needed
 
@@ -13,30 +15,30 @@ This guide sets up a **local, two-stack agent system** on **one DGX Spark**:
 
 1. [0) Assumptions](#0-assumptions)
 2. [1) Quick path (recommended): run repo setup scripts](#1-quick-path-recommended-run-repo-setup-scripts)
-3. [2) Start Nemotron3-Nano model server for PM agent (choose one, mutually exclusive)](#2-start-nemotron3-nano-model-server-for-pm-agent-choose-one-mutually-exclusive)
-4. [2A) Start vLLM (PM brain) - it takes ~82 GB VRAM](#2a-start-vllm-pm-brain---it-takes-82-gb-vram)
-5. [2B) Start NIM (PM brain alternative on DGX Spark)](#2b-start-nim-pm-brain-alternative-on-dgx-spark)
-6. [2C) Profile comparison table (NIM + Nemotron3-Nano on DGX Spark)](#2c-profile-comparison-table-nim--nemotron3-nano-on-dgx-spark)
-7. [3) Start Ollama (coding agent backend)](#3-start-ollama-coding-agent-backend)
-8. [4) Install Claude Code and connect it to Ollama](#4-install-claude-code-and-connect-it-to-ollama)
-9. [5) Configure OpenClaw to use a local PM endpoint (vLLM or NIM)](#5-configure-openclaw-to-use-a-local-pm-endpoint-vllm-or-nim)
-10. [6) Add approval-gated delegation (Option B)](#6-add-approval-gated-delegation-option-b)
-11. [7) Ensure PM reliably triggers subagents in the coding agent](#7-ensure-pm-reliably-triggers-subagents-in-the-coding-agent)
-12. [8) End-to-end sanity test](#8-end-to-end-sanity-test)
-13. [9) Troubleshooting](#9-troubleshooting)
+3. [2) Start Nemotron3-Nano model server for PM agent (optional; choose one, mutually exclusive)](#2-start-nemotron3-nano-model-server-for-pm-agent-optional-choose-one-mutually-exclusive)
+   - [2A) Start vLLM (PM brain) - it takes ~82 GB VRAM](#2a-start-vllm-pm-brain---it-takes-82-gb-vram)
+   - [2B) Start NIM (PM brain alternative on DGX Spark)](#2b-start-nim-pm-brain-alternative-on-dgx-spark)
+   - [2C) Profile comparison table (NIM + Nemotron3-Nano on DGX Spark)](#2c-profile-comparison-table-nim--nemotron3-nano-on-dgx-spark)
+4. [3) Start Ollama (coding agent backend) — background service](#3-start-ollama-coding-agent-backend--background-service)
+5. [4) Install Claude Code and connect it to Ollama](#4-install-claude-code-and-connect-it-to-ollama)
+6. [5) Install + launch OpenClaw via Ollama 0.17](#5-install--launch-openclaw-via-ollama-017)
+7. [6) Add approval-gated delegation (Option B)](#6-add-approval-gated-delegation-option-b)
+8. [7) Ensure PM reliably triggers subagents in the coding agent](#7-ensure-pm-reliably-triggers-subagents-in-the-coding-agent)
+9. [8) End-to-end sanity test](#8-end-to-end-sanity-test)
+10. [9) Troubleshooting](#9-troubleshooting)
 
 ---
 
 ## 0) Assumptions
 
-- You’re on the DGX Spark host (Linux) with a working NVIDIA stack.
-- You have Docker available with GPU access.
-- You will run:
-  - PM model server (vLLM or NIM, not both at once) on `http://127.0.0.1:8000`
-  - Ollama on `http://127.0.0.1:11434`
-- You want **local-only / no external API cost** by default.
+- You’re on the DGX Spark host (Linux) with a working NVIDIA stack (`nvidia-smi` works).
+- You have `sudo` access.
+- You have Docker available with GPU access (only needed if you run the optional Nemotron vLLM/NIM PM backend).
+- Default endpoints:
+  - Optional PM model server (vLLM or NIM): `http://127.0.0.1:8000/v1`
+  - Ollama: `http://127.0.0.1:11434`
 
-> Tip: If you later add web search, prefer self-hosted search (e.g., SearXNG) to avoid API billing.
+> Recommended: run Ollama in **background** (systemd) so it survives SSH disconnects and reboots.
 
 ---
 
@@ -44,9 +46,8 @@ This guide sets up a **local, two-stack agent system** on **one DGX Spark**:
 
 Pick one PM backend:
 
-- **vLLM path:** set `HF_TOKEN` in `.env`
-- **NIM path:** set `NIM_IMAGE` and `NIM_NGC_API_KEY` (or `NGC_API_KEY`) in `.env`
-- Do **not** run both PM backends at the same time for Nemotron3-Nano in this setup.
+- **Recommended for most users:** use OpenClaw + **Ollama cloud/local models** (skip Section 2 entirely)
+- **Optional / fully-local PM:** run **Nemotron3-Nano** via **vLLM or NIM** (Section 2)
 
 From repo root:
 
@@ -54,40 +55,44 @@ From repo root:
 cd /home/ryan/workspace/openclaw-personal-assistant
 chmod +x scripts/setup_vllm_nemotron.sh scripts/setup_nim_nemotron.sh scripts/setup_ollama_claude.sh
 
-# Option A (vLLM PM backend)
-#./scripts/setup_vllm_nemotron.sh
-
-# Option B (NIM PM backend)
-./scripts/setup_nim_nemotron.sh
-
+# (A) Start Ollama as a background service + pull qwen3-coder + generate Claude env helper
 ./scripts/setup_ollama_claude.sh
-source scripts/claude_ollama_env.sh
-claude --model qwen3-coder
+
+# (Optional) If you want Nemotron PM locally (choose ONE):
+# ./scripts/setup_vllm_nemotron.sh
+# ./scripts/setup_nim_nemotron.sh
+
+# Launch OpenClaw via Ollama (Ollama >= 0.17)
+ollama launch openclaw
 ```
 
-What each script does:
+What the repo scripts do:
 
-* `scripts/setup_vllm_nemotron.sh`
-  * loads `HF_TOKEN` from `.env` (or uses `HUGGING_FACE_HUB_TOKEN` if already exported)
-  * pulls `nvcr.io/nvidia/vllm:26.01-py3`
-  * starts Docker container `vllm-nemotron` on `http://127.0.0.1:8000`
-  * waits for `/v1/models` readiness
-* `scripts/setup_nim_nemotron.sh`
-  * loads `NIM_*` vars from `.env` (and accepts NVIDIA alias vars like `IMG_NAME`)
-  * logs into `nvcr.io`, pulls `NIM_IMAGE`, and launches NIM with Spark-style cache/workspace mounts
-  * starts Docker container `nim-nemotron` on `http://127.0.0.1:8000` by default
-  * supports `--list-profiles` and waits for `/v1/models` readiness
-* `scripts/setup_ollama_claude.sh`
-  * ensures Ollama is running on `http://127.0.0.1:11434`
-  * pulls `qwen3-coder`
-  * writes `scripts/claude_ollama_env.sh` for Claude Code env vars
-  * checks if `claude` CLI is installed
+- `scripts/setup_vllm_nemotron.sh`
+  - Loads `HF_TOKEN` from `.env` (or uses `HUGGING_FACE_HUB_TOKEN` if already exported)
+  - Pulls `nvcr.io/nvidia/vllm:26.01-py3`
+  - Starts Docker container `vllm-nemotron` on `http://127.0.0.1:8000`
+  - Waits for `/v1/models` readiness
 
-If you prefer explicit/manual steps, use sections 2-4 below.
+- `scripts/setup_nim_nemotron.sh`
+  - Loads `NIM_*` vars from `.env`
+  - Pulls `NIM_IMAGE` and launches NIM with Spark-style cache/workspace mounts
+  - Starts Docker container `nim-nemotron` on `http://127.0.0.1:8000` by default
+  - Supports `--list-profiles` and waits for `/v1/models` readiness
+
+- `scripts/setup_ollama_claude.sh`
+  - Installs/updates Ollama if missing
+  - Starts Ollama as a **systemd background service** (`systemctl enable --now ollama`)
+  - Waits until `http://127.0.0.1:11434` is responding
+  - Pulls `qwen3-coder`
+  - Writes `scripts/claude_ollama_env.sh` (generated) for Claude Code env vars
+  - Checks whether `claude` CLI is installed
 
 ---
 
-## 2) Start Nemotron3-Nano model server for PM agent (choose one, mutually exclusive)
+## 2) Start Nemotron3-Nano model server for PM agent (optional; choose one, mutually exclusive)
+
+If you plan to use OpenClaw’s PM brain via **Ollama cloud/local models**, you can skip this entire section.
 
 ### 2A) Start vLLM (PM brain) - it takes ~82 GB VRAM
 
@@ -99,10 +104,12 @@ Recommended `.env` values:
 VLLM_IMAGE="nvcr.io/nvidia/vllm:26.01-py3"
 VLLM_CONTAINER_NAME="vllm-nemotron"
 VLLM_MODEL="nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+
 VLLM_MAX_MODEL_LEN=262144
 VLLM_ALLOW_LONG_MAX_MODEL_LEN=0
 VLLM_TRUST_REMOTE_CODE=1
 VLLM_ENABLE_PREFIX_CACHING=1
+
 STARTUP_TIMEOUT_SEC=600
 STARTUP_POLL_SEC=10
 ```
@@ -137,14 +144,18 @@ Recommended `.env` values:
 NIM_IMAGE="nvcr.io/nim/nvidia/nemotron-3-nano:1.7.0-variant"
 NIM_CONTAINER_NAME="nim-nemotron"
 NIM_PORT=8000
-NIM_MODEL_NAME=""
-NIM_MODEL_PROFILE=""
+
+NIM_MODEL_NAME="nvidia/nemotron-3-nano"
+NIM_MODEL_PROFILE=""   # leave empty to select later
+
 NIM_CACHE_DIR="$HOME/.cache/nim"
 NIM_WORKSPACE_DIR="$HOME/.local/share/nim/workspace"
 NIM_SHM_SIZE="16GB"
+
 NIM_STARTUP_TIMEOUT_SEC=1200
 NIM_STARTUP_POLL_SEC=10
-NIM_NGC_API_KEY="<your_ngc_api_key>"
+
+NIM_NGC_API_KEY=""     # required
 ```
 
 List profiles for the selected image (optional):
@@ -175,105 +186,165 @@ docker logs --tail 200 nim-nemotron
 
 ### 2C) Profile comparison table (NIM + Nemotron3-Nano on DGX Spark)
 
-The table below uses `TP=1 / PP=1` (single DGX Spark) and uses NVIDIA's cross-profile accuracy slice plus DGX Spark community performance where available.
-VRAM "idle" is weights-focused (observed for BF16; file-size-based expectation for FP8/NVFP4).
-VRAM "peak" is scenario-modeled for `max_model_len=262,144` and `max_num_seqs=8`, with KV cache dtype matched to common recommendations.
+The table below uses `TP=1 / PP=1` (single DGX Spark).
+VRAM "idle" is weights-focused; VRAM "peak" is scenario-modeled for `max_model_len=262,144` and `max_num_seqs=1`.
 
-| Profile name | Precision | TP/PP | Accuracy metrics (dataset: score) | VRAM idle (GB) | VRAM peak (GB) | Latency (ms per token) | Throughput (tokens/s) | Notes on stability/compatibility | Recommendation |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| vLLM BF16 profile (NIM) | BF16 | TP1 / PP1 | MMLU-Pro: 78.3; AIME25 (no tools): 89.1; GPQA (no tools): 73.0; LiveCodeBench: 68.3; SciCode: 33.0; HLE (no tools): 10.2; TauBench V2 Airline/Retail/Telecom: 48.0/56.9/42.2 | 57.62 (observed load "mem usage") | ~71.7 (modeled, 256k x 8 seq) | - (no vLLM-bench result in collected sources) | 25-30 (anecdotal BF16 gen rate) | Highest accuracy; largest memory footprint; tuning `mamba-ssm-cache-dtype` impacts quality/perf. | Use if you prioritize maximum accuracy over VRAM/perf. |
-| vLLM FP8 profile (NIM) | FP8 (selective BF16 kept in parts) | TP1 / PP1 | MMLU-Pro: 78.1; AIME25 (no tools): 87.7; GPQA (no tools): 72.5; LiveCodeBench: 67.6; SciCode: 31.9; HLE (no tools): 10.3; TauBench V2 Airline/Retail/Telecom: 44.8/55.6/40.8 | ~30.46 (profile file size proxy) | ~36.9 (modeled, 256k x 8 seq) | 48.61 (mean TPOT, benchmarked) | 154.40 (output tok/s, benchmarked) | Explicitly supported on DGX Spark in NIM profile list. Recommended to use FP8 KV cache and lower `gpu-memory-utilization` on DGX Spark for stability. | Recommended PM brain profile: best accuracy/VRAM balance with strong DGX Spark perf. |
-| vLLM NVFP4 profile (NIM listing) | NVFP4 weights + FP8 KV (typical) | TP1 / PP1 | MMLU-Pro: 77.4; AIME25 (no tools): 86.7; GPQA (no tools): 71.9; LiveCodeBench: 65.4; SciCode: 30.7; HLE (no tools): 9.4; TauBench V2 Airline/Retail/Telecom: 41.5/54.1/41.2 | ~18.04 (profile file size proxy) | ~24.5 (modeled, 256k x 8 seq) | 36.53 (mean TPOT, benchmarked) | 167.61 (output tok/s, benchmarked) | Not listed as DGX Spark-supported in NIM profile table; multiple DGX Spark reports of backend/kernel friction and instability (misaligned address/Xid, MoE backend support errors). | Not recommended for "PM brain with NIM on DGX Spark" due to support + stability risk. |
+vLLM/NIM “used VRAM” ≈ (GPU total memory × NIM_KVCACHE_PERCENT) + runtime overhead, because vLLM pre-allocates the GPU KV cache up to that percentage; it only starts if (weights + minimum KV needed for NIM_MAX_MODEL_LEN × NIM_MAX_NUM_SEQS) ≤ (GPU total × percent)
 
-#### Recommendation and OpenClaw PM brain integration notes
+Assumptions I’m using (so the numbers are concrete)
+- DGX Spark total GPU memory commonly shows up as ~119.68 GiB (often displayed confusingly as “119.68 GB”), which is ~128.5 GB in decimal units.
+- Your fixed settings: NIM_KVCACHE_PERCENT=0.45, NIM_MAX_MODEL_LEN=262144, NIM_MAX_NUM_SEQS=1
+- Overhead” (CUDA context / workspaces / fragmentation etc.) ~ +7.2 GB (calibrated from your observed ~65 GB at 0.45).
+- Profile list + the BF16 observed load number + FP8/NVFP4 file-size proxies are from your repo’s table.
 
-Recommended profile: FP8 vLLM profile under NIM (`TP1 / PP1`).
-
-FP8 is the strongest choice for a DGX Spark "PM brain" under these constraints because:
-
-- It is explicitly supported on DGX Spark in NVIDIA's NIM vLLM profile list.
-- It is near-BF16 accuracy on NVIDIA's published evaluation slice (often within ~0.2-1.4 points depending on benchmark).
-- It provides materially better VRAM headroom (file size ~30.46 GB) than BF16 (~58.84 GB), which matters on DGX Spark if you also want longer contexts, more concurrency, or additional services.
-- DGX Spark community benchmarking shows strong serving throughput and token latency for FP8 under vLLM's benchmark harness.
+| Profile name | Precision | TP/PP | VRAM idle (GB) | VRAM peak (GB) | Latency (ms/token) | Throughput (tok/s) | Notes | Recommendation |
+|---|---:|---:|---:|---:|---:|---:|---|---|
+| vLLM BF16 profile (NIM) | BF16 | TP1/PP1 | ~112 GB | ~115 GB | - | 25–30 (anecdotal) | Highest accuracy; largest memory footprint | Use if you prioritize max accuracy |
+| vLLM FP8 profile (NIM) | FP8 | TP1/PP1 | ~65 GB | ~67 GB | ~48.6 | ~154.4 | Best accuracy/VRAM balance on Spark; strong perf | **Recommended** PM brain profile |
+| vLLM NVFP4 profile (NIM listing) | NVFP4 | TP1/PP1 | ~65 GB | ~67 GB | ~36.5 | ~167.6 | Often fastest, but may be less stable depending on backend/kernel support | Not recommended if you hit stability issues |
 
 ---
 
-## 3) Start Ollama (coding agent backend)
+## 3) Start Ollama (coding agent backend) — background service
 
-Install Ollama (use Ollama’s official install method), then start it:
+### 3.1 Install / upgrade Ollama (recommend Ollama ≥ 0.17)
 
-```bash
-ollama serve
-```
-
-Pull the coding model:
+Install or upgrade:
 
 ```bash
-ollama pull qwen3-coder
+curl -fsSL https://ollama.com/install.sh | sh
 ```
 
-Verify the model is loaded/available:
+Check version:
 
 ```bash
-ollama list
-ollama ps
+ollama -v
 ```
+
+### 3.2 Enable Ollama as a systemd service
+
+```bash
+sudo systemctl enable --now ollama
+sudo systemctl status ollama --no-pager
+```
+
+Verify it responds:
+
+```bash
+curl -fsS http://127.0.0.1:11434/api/tags | head
+```
+
+View logs:
+
+```bash
+journalctl -e -u ollama
+```
+
+> If `ollama.service` is “not found”, your `scripts/setup_ollama_claude.sh` can create it automatically (recommended), or follow the official “Adding Ollama as a startup service” steps.
 
 ---
 
 ## 4) Install Claude Code and connect it to Ollama
 
-Install Claude Code (follow Claude Code’s official install steps on your OS).
+### 4.1 Install Claude Code (CLI)
 
-Set Claude Code to use Ollama’s **Anthropic-compatible** endpoint:
+If `claude` is not installed yet:
 
 ```bash
-export ANTHROPIC_AUTH_TOKEN=ollama
-export ANTHROPIC_API_KEY=""
+curl -fsSL https://claude.ai/install.sh | bash
+```
+
+Verify:
+
+```bash
+claude --version
+```
+
+### 4.2 Pull the coding model
+
+```bash
+ollama pull qwen3-coder
+ollama list
+ollama ps
+```
+
+### 4.3 Point Claude Code at Ollama (Anthropic-compatible endpoint)
+
+```bash
+export ANTHROPIC_AUTH_TOKEN=ollama  # required but ignored by Ollama
+export ANTHROPIC_API_KEY=""         # required but ignored by Ollama
 export ANTHROPIC_BASE_URL=http://127.0.0.1:11434
 ```
 
-Test launching Claude Code with the local model:
+Test:
 
 ```bash
 claude --model qwen3-coder
 ```
 
-If it opens a session and responds, Claude Code ↔ Ollama works.
+### 4.4 Repo helper (optional)
+
+This repo’s `./scripts/setup_ollama_claude.sh` generates a helper you can source:
+
+```bash
+source scripts/claude_ollama_env.sh
+claude --model qwen3-coder
+```
 
 ---
 
-## 5) Configure OpenClaw to use a local PM endpoint (vLLM or NIM)
+## 5) Install + launch OpenClaw via Ollama 0.17
 
-Create `config/openclaw.json` (example):
+Ollama 0.17+ can install/configure OpenClaw automatically:
 
-```json
-{
-  "models": {
-    "providers": {
-      "vllm": {
-        "api": "openai-completions",
-        "baseUrl": "http://127.0.0.1:8000/v1",
-        "apiKey": "vllm-local"
-      }
-    }
-  },
-  "agents": {
-    "defaults": {
-      "model": {
-        "primary": "vllm/pm"
-      }
-    }
-  }
-}
+```bash
+ollama launch openclaw
 ```
 
-Notes:
+On first run, Ollama will:
+1) prompt to install OpenClaw via **npm** (if missing),
+2) show a security notice,
+3) let you pick a model (local or cloud),
+4) install the OpenClaw gateway daemon,
+5) start the gateway in the background and open the OpenClaw TUI.
 
-* `baseUrl` must end with `/v1` because both vLLM and NIM expose OpenAI-compatible endpoints under that prefix.
-* If you change `NIM_PORT` from `8000`, update `baseUrl` accordingly.
-* `apiKey` can be any placeholder for local usage unless you configure auth.
-* Keeping provider id `vllm` is fine even if the backend is NIM; it is just a local label in this config.
+### 5.1 Prerequisite: Node.js (OpenClaw requires Node ≥ 22)
+
+Check:
+
+```bash
+node -v || true
+npm -v || true
+```
+
+If Node is missing or < 22, install Node 22 LTS (NodeSource):
+
+```bash
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
+node -v
+npm -v
+```
+
+### 5.2 Launch OpenClaw (recommended)
+
+Interactive:
+
+```bash
+ollama launch openclaw
+```
+
+Configure without starting the TUI/gateway immediately:
+
+```bash
+ollama launch openclaw --config
+```
+
+### 5.3 Stop the OpenClaw gateway
+
+```bash
+openclaw gateway stop
+```
 
 ---
 
@@ -304,7 +375,6 @@ MODEL="qwen3-coder"
 
 # Force subagents by instruction.
 PROMPT="$(cat "${PACKET_FILE}")
-
 MANDATORY:
 - Create subagents to parallelize repo exploration and test mapping before coding.
 - Then implement the tasks and run tests.
@@ -323,29 +393,19 @@ chmod +x scripts/run_claude_task.sh
 
 In OpenClaw, enable exec approvals and allowlist only:
 
-* `bash scripts/run_claude_task.sh <packet.md>`
-* or `scripts/run_claude_task.sh <packet.md>`
+- `bash scripts/run_claude_task.sh <packet>`
+- or `scripts/run_claude_task.sh <packet>`
 
 Everything else should be denied by policy.
-
-Expected behavior:
-
-* PM proposes delegation
-* OpenClaw asks you to approve the command
-* Only then it executes the wrapper and launches Claude Code
 
 ---
 
 ## 7) Ensure PM reliably triggers subagents in the coding agent
 
-Claude Code subagent behavior is tool-driven, but you can reliably nudge it by including the explicit phrase:
-
-* “Create subagents …” / “Spawn subagents …”
-
 Enforcement:
 
-* PM must include a “Subagent instruction (MANDATORY)” section in every task packet
-* Wrapper script appends a mandatory subagent instruction even if the packet forgets
+- PM must include a “Subagent instruction (MANDATORY)” section in every task packet
+- Wrapper script appends the mandatory subagent instruction even if the packet forgets
 
 Recommended packet template:
 
@@ -361,67 +421,81 @@ Create subagents to parallelize:
 
 ## 8) End-to-end sanity test
 
-1. Start services:
+1) Start services:
+   - Ollama: `http://127.0.0.1:11434` (systemd)
+   - OpenClaw: `ollama launch openclaw` (gateway runs in background)
+   - Optional PM backend (vLLM or NIM): `http://127.0.0.1:8000/v1`
 
-   * PM backend (vLLM or NIM): `http://127.0.0.1:8000`
-   * Ollama: `http://127.0.0.1:11434`
+2) In OpenClaw, ask PM:
+   - “Goal: add a /health endpoint, update docs, and add tests. Plan it and delegate implementation.”
 
-2. In OpenClaw, ask PM:
+3) PM produces:
+   - plan + tickets
+   - a `packet.md` file content (you save it under `tasks/T001.md` for example)
+   - asks: “Approve delegating Ticket T001 to coding agent?”
 
-   * “Goal: add a /health endpoint, update docs, and add tests. Plan it and delegate implementation.”
+4) Approve.
 
-3. PM produces:
+5) PM runs:
+   - `scripts/run_claude_task.sh tasks/T001.md`
 
-   * plan + tickets
-   * a `packet.md` file content (you save it under `tasks/T001.md` for example)
-   * asks: “Approve delegating Ticket T001 to coding agent?”
-
-4. Approve.
-
-5. PM runs:
-
-   * `scripts/run_claude_task.sh tasks/T001.md`
-
-6. Claude Code:
-
-   * spawns subagents (repo exploration + tests)
-   * implements changes
-   * runs tests
-   * returns summary + file list + commands run + test results
-
-Done.
+6) Claude Code:
+   - spawns subagents (repo exploration + tests)
+   - implements changes
+   - runs tests
+   - returns summary + file list + commands run + test results
 
 ---
 
 ## 9) Troubleshooting
 
-### vLLM OOM
-
-* Reduce `--max-model-len` from `32768` → `16384`
-* Reduce concurrency (if you set it)
-* Ensure no other large model is pinned in GPU memory
-
-### NIM startup issues
-
-* Verify auth key is set: `NIM_NGC_API_KEY` (or `NGC_API_KEY`)
-* List profiles first: `./scripts/setup_nim_nemotron.sh --list-profiles`
-* Check container logs: `docker logs --tail 200 nim-nemotron`
-* Ensure vLLM is stopped before launching NIM: `docker rm -f vllm-nemotron`
-
-### Ollama slow / CPU offload
-
-* Reduce context length
-* Use smaller coding model if needed
-* Confirm `ollama ps` shows it running on GPU
+### Ollama service issues
+- Status:
+  ```bash
+  sudo systemctl status ollama --no-pager
+  ```
+- Logs:
+  ```bash
+  journalctl -u ollama --no-pager --follow --pager-end
+  ```
 
 ### Claude Code can’t connect
+- Confirm:
+  ```bash
+  echo "$ANTHROPIC_BASE_URL"
+  ```
+  should be `http://127.0.0.1:11434`
+- Confirm Ollama is running:
+  ```bash
+  curl http://127.0.0.1:11434/api/tags
+  ```
 
-* Confirm:
+### OpenClaw won’t install
+- Confirm Node ≥ 22:
+  ```bash
+  node -v
+  ```
+- Confirm npm exists:
+  ```bash
+  npm -v
+  ```
 
-  * `echo $ANTHROPIC_BASE_URL` is `http://127.0.0.1:11434`
-  * Ollama is running: `curl http://127.0.0.1:11434/api/tags`
+### vLLM OOM (optional PM backend)
+- Reduce `--max-model-len`
+- Reduce concurrency (if you set it)
+- Ensure no other large model is pinned in GPU memory
 
-### PM didn’t spawn subagents
-
-* Ensure the packet explicitly says: “Create subagents …”
-* Wrapper script appends the mandatory instruction; confirm you’re using it to launch Claude Code
+### NIM startup issues (optional PM backend)
+- Verify auth key is set: `NIM_NGC_API_KEY` (or `NGC_API_KEY`)
+- List profiles first:
+  ```bash
+  ./scripts/setup_nim_nemotron.sh --list-profiles
+  ```
+- Check container logs:
+  ```bash
+  docker logs --tail 200 nim-nemotron
+  ```
+- Ensure vLLM is stopped before launching NIM:
+  ```bash
+  docker rm -f vllm-nemotron
+  ```

@@ -1,74 +1,188 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+# setup_ollama_claude.sh
+#
+# Goal:
+# - Ensure Ollama is installed
+# - Ensure Ollama is running as a *background* systemd service
+# - Pull qwen3-coder
+# - Generate scripts/claude_ollama_env.sh for Claude Code (Anthropic-compatible)
+#
+# This script is designed to match the "background method" described in DGX_SPARK_SETUP.md.
 
-OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
-OLLAMA_MODEL="${OLLAMA_MODEL:-qwen3-coder}"
-CLAUDE_ENV_FILE="${REPO_ROOT}/scripts/claude_ollama_env.sh"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT_DIR}"
 
-require_cmd() {
-  if ! command -v "$1" >/dev/null 2>&1; then
-    echo "Error: required command not found: $1"
+O_HOST="${OLLAMA_HOST_ADDR:-127.0.0.1}"
+O_PORT="${OLLAMA_PORT:-11434}"
+O_URL="http://${O_HOST}:${O_PORT}"
+
+MODEL="${OLLAMA_CLAUDE_MODEL:-qwen3-coder}"
+ENV_HELPER="${ROOT_DIR}/scripts/claude_ollama_env.sh"
+
+log() { echo "[setup_ollama_claude] $*"; }
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+ensure_prereqs() {
+  if need_cmd apt-get; then
+    log "Installing prerequisites (curl, ca-certificates) via apt..."
+    sudo apt-get update -y
+    sudo apt-get install -y curl ca-certificates
+  else
+    log "apt-get not found; please ensure curl and ca-certificates are installed."
+  fi
+}
+
+install_ollama_if_missing() {
+  if need_cmd ollama; then
+    log "Ollama already installed: $(ollama -v || true)"
+    return 0
+  fi
+  log "Ollama not found. Installing via official installer..."
+  ensure_prereqs
+  curl -fsSL https://ollama.com/install.sh | sh
+  if ! need_cmd ollama; then
+    log "ERROR: Ollama install finished but 'ollama' still not found in PATH."
     exit 1
   fi
+  log "Ollama installed: $(ollama -v || true)"
 }
 
-ollama_ready() {
-  curl -fsS "${OLLAMA_BASE_URL}/api/tags" >/dev/null 2>&1
-}
-
-require_cmd curl
-require_cmd ollama
-
-echo "[1/5] Ensuring Ollama is running at ${OLLAMA_BASE_URL}"
-if ! ollama_ready; then
-  echo "Ollama is not reachable. Starting 'ollama serve' in background..."
-  nohup ollama serve >/tmp/ollama-serve.log 2>&1 &
-fi
-
-READY=0
-for _ in $(seq 1 30); do
-  if ollama_ready; then
-    READY=1
-    break
+create_systemd_unit_if_missing() {
+  # If the installer didn't provide a unit, create one aligned with Ollama docs.
+  if systemctl list-unit-files | grep -qE '^ollama\.service\s'; then
+    return 0
   fi
-  sleep 2
-done
 
-if [[ "${READY}" -ne 1 ]]; then
-  echo "Error: Ollama did not become ready."
-  echo "Check log: /tmp/ollama-serve.log"
-  exit 1
-fi
+  log "ollama.service not found. Creating a systemd unit (requires sudo)..."
+  local OLLAMA_BIN
+  OLLAMA_BIN="$(command -v ollama)"
 
-echo "[2/5] Pulling coding model: ${OLLAMA_MODEL}"
-ollama pull "${OLLAMA_MODEL}"
+  # Create service user/group if needed
+  if ! id -u ollama >/dev/null 2>&1; then
+    log "Creating system user 'ollama'..."
+    sudo useradd -r -s /bin/false -U -m -d /usr/share/ollama ollama || true
+  fi
 
-echo "[3/5] Writing Claude env helper: ${CLAUDE_ENV_FILE}"
-cat > "${CLAUDE_ENV_FILE}" <<EOF
+  # Create systemd unit
+  sudo tee /etc/systemd/system/ollama.service >/dev/null <<EOF
+[Unit]
+Description=Ollama Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ollama
+Group=ollama
+Environment=OLLAMA_HOST=${O_HOST}:${O_PORT}
+ExecStart=${OLLAMA_BIN} serve
+Restart=always
+RestartSec=3
+
+# Hardening (safe defaults)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  sudo systemctl daemon-reload
+  log "Created /etc/systemd/system/ollama.service"
+}
+
+start_ollama_systemd() {
+  if ! need_cmd systemctl; then
+    log "ERROR: systemctl not available. This script expects systemd for background mode."
+    log "If you're in a non-systemd environment, run 'ollama serve' in a separate session."
+    exit 1
+  fi
+
+  # Create unit if missing (some installs may not ship the unit)
+  create_systemd_unit_if_missing
+
+  log "Enabling + starting Ollama systemd service..."
+  sudo systemctl enable --now ollama
+
+  log "Checking Ollama service status..."
+  sudo systemctl status ollama --no-pager || true
+}
+
+wait_for_ollama() {
+  local timeout="${OLLAMA_WAIT_TIMEOUT_SEC:-60}"
+  local start_ts
+  start_ts="$(date +%s)"
+
+  log "Waiting for Ollama to respond at ${O_URL} (timeout ${timeout}s)..."
+  while true; do
+    if curl -fsS "${O_URL}/api/tags" >/dev/null 2>&1; then
+      log "Ollama is responding."
+      return 0
+    fi
+    local now
+    now="$(date +%s)"
+    if (( now - start_ts >= timeout )); then
+      log "ERROR: Ollama did not respond within ${timeout}s."
+      log "Try: sudo systemctl status ollama --no-pager"
+      log "Logs: journalctl -u ollama --no-pager --pager-end"
+      exit 1
+    fi
+    sleep 2
+  done
+}
+
+pull_model() {
+  log "Pulling model: ${MODEL}"
+  ollama pull "${MODEL}"
+  log "Installed models:"
+  ollama list || true
+}
+
+write_env_helper() {
+  log "Writing Claude Code env helper: ${ENV_HELPER}"
+  cat > "${ENV_HELPER}" <<EOF
 #!/usr/bin/env bash
+# Generated by scripts/setup_ollama_claude.sh
+# Usage:
+#   source scripts/claude_ollama_env.sh
+#   claude --model ${MODEL}
+
 export ANTHROPIC_AUTH_TOKEN=ollama
 export ANTHROPIC_API_KEY=""
-export ANTHROPIC_BASE_URL=${OLLAMA_BASE_URL}
+export ANTHROPIC_BASE_URL=${O_URL}
 EOF
-chmod +x "${CLAUDE_ENV_FILE}"
+  chmod +x "${ENV_HELPER}"
+}
 
-echo "[4/5] Current Ollama models:"
-ollama list || true
+check_claude_cli() {
+  if need_cmd claude; then
+    log "Claude CLI detected: $(claude --version 2>/dev/null || true)"
+  else
+    log "Claude CLI not found."
+    log "Install it (once) with:"
+    log "  curl -fsSL https://claude.ai/install.sh | bash"
+  fi
+}
 
-echo "[5/5] Claude Code check:"
-if command -v claude >/dev/null 2>&1; then
-  claude --version || true
-  echo "Claude Code is installed."
-  echo "Run: source scripts/claude_ollama_env.sh"
-  echo "Then: claude --model ${OLLAMA_MODEL}"
-else
-  echo "Claude Code CLI is not installed yet."
-  echo "Install Claude Code, then run:"
-  echo "  source scripts/claude_ollama_env.sh"
-  echo "  claude --model ${OLLAMA_MODEL}"
-fi
+main() {
+  install_ollama_if_missing
+  start_ollama_systemd
+  wait_for_ollama
+  pull_model
+  write_env_helper
+  check_claude_cli
+  log "Done."
+  log "Next:"
+  log "  source scripts/claude_ollama_env.sh"
+  log "  claude --model ${MODEL}"
+  log "  ollama launch openclaw"
+}
 
-echo "Done. Ollama endpoint: ${OLLAMA_BASE_URL}"
+main "$@"
