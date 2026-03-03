@@ -143,6 +143,7 @@ Use this checklist for consistent behavior:
 1) Always dispatch through `scripts/run_claude_task.sh` (never direct `claude ...` from PM).
 2) Keep OpenClaw exec allowlist narrow:
    - `scripts/run_claude_task.sh <packet.md>`
+   - Do not use `bash scripts/run_claude_task.sh ...` (this should be blocked by allowlist policy).
 3) Create packets from `tasks/TEMPLATE_PACKET.md` and include:
    - `Web Search: off|optional|required`
    - optional `Web Search Model: <name>:cloud` (used when search is required)
