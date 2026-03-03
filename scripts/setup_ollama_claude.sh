@@ -6,7 +6,8 @@ set -euo pipefail
 # Goal:
 # - Ensure Ollama is installed
 # - Ensure Ollama is running as a *background* systemd service
-# - Pull qwen3-coder
+# - Pull required qwen3-coder source models
+# - Create local aliases used by Claude
 # - Generate scripts/claude_ollama_env.sh for Claude Code (Anthropic-compatible)
 #
 # This script is designed to match the "background method" described in DGX_SPARK_SETUP.md.
@@ -25,6 +26,14 @@ log() { echo "[setup_ollama_claude] $*"; }
 
 need_cmd() {
   command -v "$1" >/dev/null 2>&1
+}
+
+is_service_enabled() {
+  systemctl is-enabled ollama >/dev/null 2>&1
+}
+
+is_service_active() {
+  systemctl is-active ollama >/dev/null 2>&1
 }
 
 ensure_prereqs() {
@@ -108,11 +117,26 @@ start_ollama_systemd() {
   # Create unit if missing (some installs may not ship the unit)
   create_systemd_unit_if_missing
 
-  log "Enabling + starting Ollama systemd service..."
-  sudo systemctl enable --now ollama
+  if is_service_enabled && is_service_active; then
+    log "Ollama service already enabled and active. Skipping enable/start."
+  else
+    if ! is_service_enabled; then
+      log "Enabling Ollama systemd service..."
+      sudo systemctl enable ollama
+    else
+      log "Ollama service already enabled."
+    fi
+
+    if ! is_service_active; then
+      log "Starting Ollama systemd service..."
+      sudo systemctl start ollama
+    else
+      log "Ollama service already active."
+    fi
+  fi
 
   log "Checking Ollama service status..."
-  sudo systemctl status ollama --no-pager || true
+  systemctl status ollama --no-pager || true
 }
 
 wait_for_ollama() {
@@ -138,11 +162,83 @@ wait_for_ollama() {
   done
 }
 
-pull_model() {
-  log "Pulling model: ${MODEL}"
-  ollama pull "${MODEL}"
+INSTALLED_MODELS=""
+
+refresh_installed_models() {
+  INSTALLED_MODELS="$(ollama list | awk 'NR>1 {print $1}')"
+}
+
+has_model_tag() {
+  local tag="$1"
+  grep -Fxq "${tag}" <<< "${INSTALLED_MODELS}"
+}
+
+has_model_alias() {
+  local alias="$1"
+  awk -v name="${alias}" '
+    $0 == name || index($0, name ":") == 1 { found=1 }
+    END { exit (found ? 0 : 1) }
+  ' <<< "${INSTALLED_MODELS}"
+}
+
+ensure_models_and_aliases() {
+  log "Checking installed Ollama models..."
+  refresh_installed_models
+
+  if has_model_tag "qwen3-coder:30b"; then
+    log "Model already present: qwen3-coder:30b (skip pull)"
+  else
+    log "Pulling model: qwen3-coder:30b"
+    ollama pull qwen3-coder:30b
+    refresh_installed_models
+  fi
+
+  if has_model_tag "qwen3-coder-next:latest"; then
+    log "Model already present: qwen3-coder-next:latest (skip pull)"
+  else
+    log "Pulling model: qwen3-coder-next:latest"
+    ollama pull qwen3-coder-next:latest
+    refresh_installed_models
+  fi
+
+  # Keep support for a custom Claude model override.
+  if [[ "${MODEL}" != "qwen3-coder" && "${MODEL}" != "qwen3-coder-next" ]]; then
+    if has_model_alias "${MODEL}"; then
+      log "Custom Claude model already present: ${MODEL} (skip pull)"
+    else
+      log "Pulling custom Claude model override: ${MODEL}"
+      ollama pull "${MODEL}"
+      refresh_installed_models
+    fi
+  fi
+
+  if has_model_alias "qwen3-coder"; then
+    log "Alias already present: qwen3-coder (skip copy)"
+  else
+    log "Applying alias: ollama cp qwen3-coder:30b qwen3-coder"
+    ollama cp qwen3-coder:30b qwen3-coder
+    refresh_installed_models
+  fi
+
+  if has_model_alias "qwen3-coder-next"; then
+    log "Alias already present: qwen3-coder-next (skip copy)"
+  else
+    log "Applying alias: ollama cp qwen3-coder-next:latest qwen3-coder-next"
+    ollama cp qwen3-coder-next:latest qwen3-coder-next
+    refresh_installed_models
+  fi
+
+  if ! has_model_alias "qwen3-coder"; then
+    log "ERROR: alias 'qwen3-coder' not found after alias setup."
+    exit 1
+  fi
+  if ! has_model_alias "qwen3-coder-next"; then
+    log "ERROR: alias 'qwen3-coder-next' not found after alias setup."
+    exit 1
+  fi
+
   log "Installed models:"
-  ollama list || true
+  ollama list
 }
 
 write_env_helper() {
@@ -175,7 +271,7 @@ main() {
   install_ollama_if_missing
   start_ollama_systemd
   wait_for_ollama
-  pull_model
+  ensure_models_and_aliases
   write_env_helper
   check_claude_cli
   log "Done."
