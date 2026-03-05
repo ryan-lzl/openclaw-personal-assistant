@@ -35,6 +35,10 @@ Key design goal: **The PM agent can talk to the coding agent**, but must ask for
 │ ├── PRD.md
 │ └── SOUL.md
 ├── config/
+├── .claude/
+│ └── skills/
+│   └── openclaw-delegate/
+│     └── SKILL.md
 ├── tasks/
 │ └── TEMPLATE_PACKET.md
 └── scripts/
@@ -57,6 +61,7 @@ Key design goal: **The PM agent can talk to the coding agent**, but must ask for
    - use vLLM as primary model
    - point `baseUrl` to your PM endpoint (`http://127.0.0.1:8000/v1`)
    - allow only `scripts/run_claude_task.sh <packet.md>` as delegation command
+   - keep project skill `.claude/skills/openclaw-delegate/SKILL.md` in repo
 4) Use the **handoff protocol** to dispatch coding tasks (approval required).
 
 ---
@@ -132,6 +137,7 @@ See full setup guide: `doc/DGX_SPARK_SETUP.md`
    - validated subagent range from packet (`Subagents Min` / `Subagents Max`)
    - web-search mode derived from packet (`Web Search: off|optional|required`) or env override
    - auto-switch to cloud model for `Web Search: required` (from `Web Search Model` or `WEB_SEARCH_CLOUD_MODEL`)
+   - delegation through project skill `/openclaw-delegate <packet.md>`
 5) Claude Code edits files + runs tests, then reports results back.
 
 ---
@@ -144,16 +150,18 @@ Use this checklist for consistent behavior:
 2) Keep OpenClaw exec allowlist narrow:
    - `scripts/run_claude_task.sh <packet.md>`
    - Do not use `bash scripts/run_claude_task.sh ...` (this should be blocked by allowlist policy).
-3) Create packets from `tasks/TEMPLATE_PACKET.md` and include:
+3) Keep project skill in-repo and versioned:
+   - `.claude/skills/openclaw-delegate/SKILL.md`
+4) Create packets from `tasks/TEMPLATE_PACKET.md` and include:
    - `Web Search: off|optional|required`
    - optional `Web Search Model: <name>:cloud` (used when search is required)
    - `Subagents Min: 2..10`
    - `Subagents Max: 2..10` (must be >= min)
    - `Subagent instruction (MANDATORY)`
-4) Choose model by task type:
+5) Choose model by task type:
    - local/offline coding: `CLAUDE_MODEL=qwen3-coder`
    - web-search-required tasks: wrapper auto-switches to `WEB_SEARCH_CLOUD_MODEL` (default `minimax-m2.5:cloud`) if needed
-5) If you need hosted search subagents from Ollama, initialize Claude Code via:
+6) If you need hosted search subagents from Ollama, initialize Claude Code via:
    - `ollama launch claude --model minimax-m2.5:cloud --subagents search-web,search-github,search-docs`
 
 ---
@@ -168,3 +176,5 @@ Use this checklist for consistent behavior:
 - Ollama Anthropic compatibility docs: https://docs.ollama.com/api/anthropic-compatibility
 - Ollama Claude Code integration docs: https://docs.ollama.com/integrations/claude-code
 - Ollama subagents + web search post: https://ollama.com/blog/web-search-subagents-claude-code
+- Claude Skills docs: https://code.claude.com/docs/en/skills
+- Anthropic skills repository: https://github.com/anthropics/skills

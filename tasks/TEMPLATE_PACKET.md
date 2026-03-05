@@ -32,13 +32,14 @@ Allowed values:
 
 `Web Search Model` is optional when `Web Search` is `off`/`optional`.
 When `Web Search: required`, wrapper auto-switches to `Web Search Model` (or env `WEB_SEARCH_CLOUD_MODEL`) if `CLAUDE_MODEL` is local.
+The delegation skill (`.claude/skills/openclaw-delegate/SKILL.md`) enforces search behavior during execution.
 
 ## Subagent instruction (MANDATORY)
 Subagents Min: 2  
 Subagents Max: 10
 
 Rules:
-- both fields are required by `scripts/run_claude_task.sh`
+- both fields are required by `scripts/run_claude_task.sh` and enforced by the delegation skill
 - values must be integers in the range `2..10`
 - `Subagents Min` must be `<= Subagents Max`
 

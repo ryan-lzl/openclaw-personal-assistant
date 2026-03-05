@@ -13,6 +13,7 @@ Required packet fields:
 Env overrides:
   OLLAMA_BASE_URL   (default: http://127.0.0.1:11434)
   CLAUDE_MODEL      (default: qwen3-coder)
+  CLAUDE_DELEGATION_SKILL (default: openclaw-delegate)
   WEB_SEARCH_CLOUD_MODEL (default: minimax-m2.5:cloud)
   WEB_SEARCH_MODE   (default: auto)
                     auto     -> read "Web Search: ..." from packet, else off
@@ -27,6 +28,9 @@ if [[ $# -ne 1 || -z "${PACKET_FILE}" || ! -f "${PACKET_FILE}" ]]; then
   usage
   exit 1
 fi
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PACKET_FILE="$(cd "$(dirname "${PACKET_FILE}")" && pwd)/$(basename "${PACKET_FILE}")"
 
 require_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -102,8 +106,10 @@ require_cmd curl
 
 OLLAMA_BASE_URL="${OLLAMA_BASE_URL:-http://127.0.0.1:11434}"
 CLAUDE_MODEL="${CLAUDE_MODEL:-qwen3-coder}"
+CLAUDE_DELEGATION_SKILL="${CLAUDE_DELEGATION_SKILL:-openclaw-delegate}"
 WEB_SEARCH_CLOUD_MODEL="${WEB_SEARCH_CLOUD_MODEL:-minimax-m2.5:cloud}"
 WEB_SEARCH_MODE="$(normalize_mode "${WEB_SEARCH_MODE:-auto}")"
+CLAUDE_DELEGATION_SKILL_FILE="${ROOT_DIR}/.claude/skills/${CLAUDE_DELEGATION_SKILL}/SKILL.md"
 
 # Claude Code -> Ollama Anthropic compatibility defaults.
 export ANTHROPIC_AUTH_TOKEN="${ANTHROPIC_AUTH_TOKEN:-ollama}"
@@ -165,60 +171,30 @@ if [[ "${WEB_SEARCH_MODE}" == "optional" ]] && ! is_cloud_model "${CLAUDE_MODEL}
   echo "         Search may be unavailable unless you configured a search MCP/tool." >&2
 fi
 
-PACKET_CONTENT="$(cat "${PACKET_FILE}")"
-
-if [[ "${WEB_SEARCH_MODE}" == "required" ]]; then
-  WEB_SEARCH_BLOCK="$(cat <<'EOF'
-## Web search (MANDATORY)
-Use web search for all time-sensitive or external facts.
-- Include source URLs.
-- Include retrieval date in YYYY-MM-DD format.
-- If a source is inaccessible, say so explicitly and continue with available evidence.
-EOF
-)"
-elif [[ "${WEB_SEARCH_MODE}" == "optional" ]]; then
-  WEB_SEARCH_BLOCK="$(cat <<'EOF'
-## Web search (OPTIONAL)
-Use web search when the task depends on external or recent information.
-- Include source URLs for all externally sourced claims.
-- Include retrieval date in YYYY-MM-DD format.
-EOF
-)"
-else
-  WEB_SEARCH_BLOCK="$(cat <<'EOF'
-## Web search (DISABLED)
-Do not use external web search for this task. Work from repo context and local execution.
-EOF
-)"
+if [[ ! -f "${CLAUDE_DELEGATION_SKILL_FILE}" ]]; then
+  echo "Error: delegation skill not found at ${CLAUDE_DELEGATION_SKILL_FILE}" >&2
+  echo "Create the project skill before running delegation." >&2
+  exit 1
 fi
 
 PROMPT="$(cat <<EOF
-${PACKET_CONTENT}
+/${CLAUDE_DELEGATION_SKILL} ${PACKET_FILE}
 
-## Subagent instruction (MANDATORY)
-Create between ${SUBAGENTS_MIN} and ${SUBAGENTS_MAX} subagents to parallelize:
-1) Relevant files and entrypoints
-2) Test mapping and run strategy
-3) Existing patterns/conventions to follow
+Launcher context (validated by wrapper):
+- Effective Web Search Mode: ${WEB_SEARCH_MODE}
+- Packet Web Search Mode: ${PACKET_WEB_SEARCH_MODE}
+- Subagents Min: ${SUBAGENTS_MIN}
+- Subagents Max: ${SUBAGENTS_MAX}
+- Selected Model: ${CLAUDE_MODEL}
 
-Select the exact number based on complexity and explain why that count is appropriate.
-Each subagent must return concise findings before implementation begins.
-
-${WEB_SEARCH_BLOCK}
-
-## Output contract (MANDATORY)
-Return:
-1) Summary of what changed
-2) Files changed
-3) Commands run
-4) Test results
-5) Risks or follow-ups
+Use the launcher context as source of truth when it conflicts with packet text.
 EOF
 )"
 
 echo "Launching Claude Code"
 echo "  packet: ${PACKET_FILE}"
 echo "  model: ${CLAUDE_MODEL}"
+echo "  skill: ${CLAUDE_DELEGATION_SKILL}"
 echo "  web search mode: ${WEB_SEARCH_MODE}"
 echo "  subagents range: ${SUBAGENTS_MIN}-${SUBAGENTS_MAX}"
 

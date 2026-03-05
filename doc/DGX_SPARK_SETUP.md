@@ -22,8 +22,8 @@ This guide sets up a **local, two-stack agent system** on **one DGX Spark**:
 3. [3) Start Ollama (coding agent backend) — background service](#3-start-ollama-coding-agent-backend--background-service)
 4. [4) Claude Code manual step (skip if setup script already ran)](#4-claude-code-manual-step-skip-if-setup-script-already-ran)
 5. [5) Install + launch OpenClaw via Ollama 0.17](#5-install--launch-openclaw-via-ollama-017)
-6. [6) Add approval-gated delegation (Option B)](#6-add-approval-gated-delegation-option-b)
-7. [7) Ensure PM reliably triggers subagents in the coding agent](#7-ensure-pm-reliably-triggers-subagents-in-the-coding-agent)
+6. [6) Add approval-gated delegation with Claude Skill](#6-add-approval-gated-delegation-with-claude-skill)
+7. [7) Ensure PM reliably triggers subagents via the delegation skill](#7-ensure-pm-reliably-triggers-subagents-via-the-delegation-skill)
 8. [8) End-to-end sanity test](#8-end-to-end-sanity-test)
 9. [9) PM ↔ Coding Agent Flow (Mermaid)](#9-pm--coding-agent-flow-mermaid)
 
@@ -333,48 +333,51 @@ openclaw gateway stop
 
 ---
 
-## 6) Add approval-gated delegation (Option B)
+## 6) Add approval-gated delegation with Claude Skill
 
-Goal: The PM agent can *only* trigger the coding agent through a **single wrapper script**, and OpenClaw will ask for approval before it runs.
+Goal: The PM agent can *only* trigger the coding agent through a **single wrapper script**, and OpenClaw will ask for approval before it runs. The wrapper dispatches to a **project Claude Skill**.
 
-### 6.1 Create the wrapper script
+### 6.1 Add the project Claude Skill
 
-Create `scripts/run_claude_task.sh`:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-PACKET_FILE="${1:-}"
-if [[ -z "${PACKET_FILE}" || ! -f "${PACKET_FILE}" ]]; then
-  echo "Usage: $0 <packet.md>"
-  exit 1
-fi
-
-# Claude Code -> Ollama Anthropic compatibility
-export ANTHROPIC_AUTH_TOKEN=ollama
-export ANTHROPIC_API_KEY=""
-export ANTHROPIC_BASE_URL=http://127.0.0.1:11434
-
-MODEL="qwen3-coder"
-
-# Force subagents by instruction.
-PROMPT="$(cat "${PACKET_FILE}")
-MANDATORY:
-- Create subagents to parallelize repo exploration and test mapping before coding.
-- Then implement the tasks and run tests.
-- Return: summary, files changed, commands run, test results."
-
-exec claude --model "${MODEL}" --prompt "${PROMPT}"
-```
-
-Make it executable:
+Create project skill folder and file:
 
 ```bash
-chmod +x scripts/run_claude_task.sh
+mkdir -p .claude/skills/openclaw-delegate
 ```
 
-### 6.2 Configure OpenClaw exec approvals
+Create `.claude/skills/openclaw-delegate/SKILL.md`:
+
+```md
+---
+name: openclaw-delegate
+description: Execute an OpenClaw coding task packet from a file path. Use for PM-to-coding delegation in this repository.
+argument-hint: "<packet.md>"
+disable-model-invocation: true
+---
+```
+
+Implementation notes:
+
+- The skill should read `<packet.md>`, validate required fields, enforce subagent-first execution, apply web-search policy, and enforce the output contract.
+- Keep this as a **project skill** under `.claude/skills/` so repo behavior is versioned and deterministic.
+
+### 6.2 Use wrapper script as the only delegated entrypoint
+
+`scripts/run_claude_task.sh` remains the only host command PM can execute.
+
+Wrapper responsibilities:
+
+- validate packet fields (`Web Search`, `Subagents Min`, `Subagents Max`)
+- choose/switch model (including cloud switch for `Web Search: required`)
+- invoke Claude with `/openclaw-delegate <packet.md>` plus validated launcher context
+
+Quick check:
+
+```bash
+scripts/run_claude_task.sh tasks/T001.md
+```
+
+### 6.3 Configure OpenClaw exec approvals
 
 In OpenClaw, enable exec approvals and allowlist only:
 
@@ -426,17 +429,21 @@ while `bash scripts/run_claude_task.sh <packet>` is denied as an allowlist miss.
 
 ---
 
-## 7) Ensure PM reliably triggers subagents in the coding agent
+## 7) Ensure PM reliably triggers subagents via the delegation skill
 
 Enforcement:
 
-- PM must include a “Subagent instruction (MANDATORY)” section in every task packet
-- Wrapper script appends the mandatory subagent instruction even if the packet forgets
+- PM must include packet fields required by the wrapper and skill (`Web Search`, `Subagents Min`, `Subagents Max`)
+- Wrapper validates packet fields and passes launcher context to the skill
+- `openclaw-delegate` skill enforces subagent-first workflow before implementation
 
 Recommended packet template:
 
 ```md
 ## Subagent instruction (MANDATORY)
+Subagents Min: 2
+Subagents Max: 10
+
 Create subagents to parallelize:
 1) Map relevant entrypoints and code paths
 2) Locate tests and how to run them
@@ -466,6 +473,7 @@ Create subagents to parallelize:
    - `scripts/run_claude_task.sh tasks/T001.md`
 
 6) Claude Code:
+   - invokes project skill `/openclaw-delegate tasks/T001.md`
    - spawns subagents (repo exploration + tests)
    - implements changes
    - runs tests
@@ -480,7 +488,8 @@ flowchart TD
     U[You] -->|Chat / approve delegation| PM[OpenClaw PM Agent]
     PM -->|Inference| NIM[NIM or vLLM endpoint<br/>http://127.0.0.1:8000/v1<br/>Nemotron3-Nano]
     PM -->|Approval-gated exec| WRAP[scripts/run_claude_task.sh]
-    WRAP -->|claude --model qwen3-coder| CC[Claude Code Coding Agent]
+    WRAP -->|/openclaw-delegate packet.md| SKILL[Project Skill<br/>.claude/skills/openclaw-delegate]
+    SKILL -->|claude --model qwen3-coder| CC[Claude Code Coding Agent]
     CC -->|Anthropic-compatible API| OLLAMA[Ollama<br/>http://127.0.0.1:11434]
     OLLAMA --> QWEN[qwen3-coder]
     CC -->|Code edits + test results| PM
